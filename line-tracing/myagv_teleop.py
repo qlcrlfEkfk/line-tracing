@@ -55,8 +55,12 @@ speedBindings = {
 # 픽셀당 실제 길이 비율 설정
 ym_per_pix = 0.56 / 480  # 세로 픽셀당 미터
 xm_per_pix = 0.37 / 640  # 가로 픽셀당 미터
-previous_turn = 0.5  # 초기 회전 값
-previous_speed = 0.25  # 초기 속도 값
+
+# previous_turn = 0.5  # 초기 회전 값
+# previous_speed = 0.25  # 초기 속도 값
+
+camera_matrix = np.load(r"/home/er/images/camera_matrix.npy")
+dist_coeffs = np.load(r"/home/er/images/dist_coeffs.npy")
 
 # 카메라 캡처 스레드
 class CameraThread(threading.Thread):
@@ -70,10 +74,12 @@ class CameraThread(threading.Thread):
 
     def run(self):
         while self.running:
-            ret, self.frame = self.cap.read()
+            ret, frame = self.cap.read()
             if not ret:
-                print("Failed to read from camera.")
-                self.running = False
+                print("Failed to grab frame. Exiting...")
+                self.running = False  # 종료 상태 설정
+                break
+            self.frame = frame
 
     def get_frame(self):
         return self.frame
@@ -95,8 +101,13 @@ class CameraProcessingThread(threading.Thread):
     def run(self):
         while self.running:
             frame = self.camera_thread.get_frame()
-            if frame is not None:
+            if frame is None:
+                time.sleep(0.05)  # 프레임이 없으면 잠시 대기
+                continue
+            try:
                 self.process_frame(frame)
+            except Exception as e:
+                print(f"Error processing frame: {e}")
 
     def stop(self):
         self.running = False
@@ -106,21 +117,35 @@ class CameraProcessingThread(threading.Thread):
         if frame is None:
             print("Received None frame. Skipping processing.")
             return
-        filtered_image = self.color_filter(frame)
-        roi_image = self.roi(filtered_image)
-        warped_img, minverse = self.wrapping(roi_image)
+        
+        h, w = frame.shape[:2]
+        new_camera_mtx, roi_value = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w, h), 1, (w, h))
+        undistorted_frame = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_camera_mtx)
 
-        _gray = cv2.cvtColor(warped_img, cv2.COLOR_BGR2GRAY)
+        filtered_image = self.color_filter(undistorted_frame)
+        warped_img, minverse = self.wrapping(filtered_image)
+        roi_image = self.roi(warped_img)
+
+        _gray = cv2.cvtColor(roi_image, cv2.COLOR_BGR2GRAY)
         _, thresh = cv2.threshold(_gray, 1, 255, cv2.THRESH_BINARY)
         leftbase, rightbase = self.plothistogram(thresh)
         draw_info, out_img = self.slide_window_search(thresh, leftbase, rightbase)
 
-        result, offset = self.draw_lane_lines_with_offset(frame, thresh, minverse, draw_info)
+    # 차선 감지 확인
+        if len(draw_info['left_fitx']) == 0 or len(draw_info['right_fitx']) == 0:
+            print("Skipping frame: No lane detected.")
+            cv2.imshow("Result", undistorted_frame)
+            cv2.waitKey(1)  # 화면 갱신 보장
+            return
+
+        out_img_unwarp = cv2.warpPerspective(out_img, minverse, (w, h))
+        result, offset = self.draw_lane_lines_with_offset(undistorted_frame, thresh, minverse, draw_info)
         
         # 전달된 offset을 사용하여 pub_thread 업데이트
         self.pub_thread.update_offset(offset)
         
-        cv2.imshow("(Unwarped) Sliding Window Search", out_img)
+        cv2.imshow("roi", roi_image)
+        cv2.imshow("(Unwarped) Sliding Window Search", out_img_unwarp)
         cv2.imshow("Result", result)
         cv2.waitKey(1)
 
@@ -138,15 +163,8 @@ class CameraProcessingThread(threading.Thread):
         yellow_upper = np.array([35, 204, 255])
         yellow_mask = cv2.inRange(hls, yellow_lower, yellow_upper)
         
-        # 검은색 제외
-        black_lower = np.array([0, 0, 0])
-        black_upper = np.array([180, 255, 50])
-        black_mask = cv2.inRange(hls, black_lower, black_upper)
-        black_mask = cv2.bitwise_not(black_mask)  # 검은색 영역을 제외하기 위해 반전
-        
         # 흰색과 노란색 마스크 결합
-        combined_mask = cv2.bitwise_or(white_mask, yellow_mask)
-        final_mask = cv2.bitwise_and(combined_mask, black_mask)  # 검은색 제외
+        final_mask = cv2.bitwise_or(white_mask, yellow_mask)
         
         # 최종 필터 적용
         return cv2.bitwise_and(image, image, mask=final_mask)
@@ -154,7 +172,7 @@ class CameraProcessingThread(threading.Thread):
 
     def roi(self, image):
         x, y = image.shape[1], image.shape[0]
-        _shape = np.array([[(0, y), (x, y), (x, 0), (0,0)]], dtype=np.int32)
+        _shape = np.array([[(25, y), (x-25, y), (x-25, 0), (25,0)]], dtype=np.int32)
         mask = np.zeros_like(image)
         ignore_mask_color = (255,) * image.shape[2] if len(image.shape) > 2 else 255
         cv2.fillPoly(mask, np.int32([_shape]), ignore_mask_color)
@@ -162,7 +180,7 @@ class CameraProcessingThread(threading.Thread):
 
     def wrapping(self, image):
         h, w = image.shape[:2]
-        source = np.float32([[0, h], [w-0, h], [40, 140], [w - 40, 140]])
+        source = np.float32([[35, 350], [w-35, 350], [250, 170], [w - 250, 170]])
         destination = np.float32([[0, h], [w, h], [0, 0], [w, 0]])
         transform_matrix = cv2.getPerspectiveTransform(source, destination)
         minv = cv2.getPerspectiveTransform(destination, source)
@@ -208,11 +226,15 @@ class CameraProcessingThread(threading.Thread):
             if len(good_right) > minpix:
                 right_current = int(np.mean(nonzero_x[good_right]))
 
-        left_lane, right_lane = np.concatenate(left_lane), np.concatenate(right_lane)
+        # 픽셀 데이터 연결
+        left_lane = np.concatenate(left_lane) if len(left_lane) > 0 else np.array([])
+        right_lane = np.concatenate(right_lane) if len(right_lane) > 0 else np.array([])
         leftx, lefty = nonzero_x[left_lane], nonzero_y[left_lane]
         rightx, righty = nonzero_x[right_lane], nonzero_y[right_lane]
 
-        if len(leftx) == 0 or len(lefty) == 0 or len(rightx) == 0 or len(righty) == 0:
+        # 차선 픽셀이 감지되지 않은 경우 처리
+        if len(leftx) == 0 or len(rightx) == 0:
+            print("No lane pixels detected.")
             return {'left_fitx': np.array([]), 'right_fitx': np.array([]), 'ploty': np.array([])}, out_img
 
         left_fit = np.polyfit(lefty, leftx, 2)
@@ -280,18 +302,24 @@ class CameraProcessingThread(threading.Thread):
         newwarp = cv2.warpPerspective(color_warp, Minv, (original_image.shape[1], original_image.shape[0]))
         result = cv2.addWeighted(original_image, 1, newwarp, 0.4, 0)
 
-        # 초록색 점으로 중앙선을 그림
-        for y, x in zip(ploty.astype(int), mean_x.astype(int)):
-            cv2.circle(result, (x, y), 3, (0, 255, 0), -1)
+        # mean_x와 ploty를 원본 이미지 좌표계로 변환
+        mean_points = np.array([np.transpose(np.vstack([mean_x, ploty]))])  # 중앙선 좌표 (탑뷰 기준)
+        mean_points_transformed = cv2.perspectiveTransform(mean_points, Minv)  # 원본 이미지 좌표계로 변환
+
+        # 변환된 좌표로 중앙선을 그리기
+        for point in mean_points_transformed[0]:
+            x, y = point
+            cv2.circle(result, (int(x), int(y)), 3, (0, 255, 0), -1)
 
         # 빨간색 기준점 추가 (320, 430)
         red_point_x, red_point_y = 320, 330
         cv2.circle(result, (red_point_x, red_point_y), 5, (0, 0, 255), -1)
 
         # offset 계산
+        offset = 0
         if len(mean_x) > 0 and red_point_y in ploty:
-            center_x_at_430 = int(mean_x[ploty.astype(int) == red_point_y][0])
-            offset = (center_x_at_430 - red_point_x) * xm_per_pix * 100
+            center_x_at = int(mean_x[ploty.astype(int) == red_point_y][0])
+            offset = (center_x_at - red_point_x) * xm_per_pix * 100
 
         print(f"Calculated offset: {offset:.2f} cm")
         return result, offset
@@ -408,8 +436,8 @@ class PublishThread(threading.Thread):
         # offset_ratio = (self.Kp * self.offset) + (self.Ki * self.integral_offset)
         # turn = max(-1.0, min(1.0, turn + offset_ratio))
 
-        # 계산된 값들을 즉시 pub_thread에 업데이트하여 반영
-        self.update(x, y, z, th, speed, turn)
+        ## 계산된 값들을 즉시 pub_thread에 업데이트하여 반영 thread에 있는 값들을 가져와서 main 함수에서 업데이트하게 
+        # self.update(x, y, z, th, speed, turn)
 
     
 def getKey(timeout):
@@ -444,7 +472,7 @@ if __name__ == "__main__":
     turn = rospy.get_param("~turn", 0)
     speed_limit = rospy.get_param("~speed_limit", 1.0)
     turn_limit = rospy.get_param("~turn_limit", 1.0)
-    repeat = rospy.get_param("~repeat_rate", 0.05)
+    repeat = rospy.get_param("~repeat_rate", 0)
     key_timeout = rospy.get_param("~key_timeout", 0.5)
     
     pub_thread = PublishThread(repeat)
@@ -462,18 +490,19 @@ if __name__ == "__main__":
 
         while not rospy.is_shutdown():
             key = getKey(key_timeout)
+
             if key == 'v':
+                # 카메라 활성화/비활성화 토글
                 camera_on = not camera_on
                 if camera_on:
-                    try:
-                        camera_thread.start()
-                        processing_thread.start()
-                    except Exception as e:
-                        print("Error starting camera or processing thread:", e)
-                        camera_on = False
+                    print("Starting camera...")
+                    camera_thread.start()
+                    processing_thread.start()
                 else:
+                    print("Stopping camera...")
                     camera_thread.stop()
                     processing_thread.stop()
+
             elif key in moveBindings:
                 x, y, z, th = moveBindings[key]
             elif key in speedBindings:
@@ -488,15 +517,14 @@ if __name__ == "__main__":
             pub_thread.update(x, y, z, th, speed, turn)
 
     except Exception as e:
-        print("An unexpected error occurred:", e)
+        print(f"An unexpected error occurred: {e}")
 
-                                
     finally:
         try:
             camera_thread.stop()
             processing_thread.stop()
             pub_thread.stop()
         except Exception as e:
-            print("Error while stopping threads:", e)
+            print(f"Error while stopping threads: {e}")
         restoreTerminalSettings(settings)
         cv2.destroyAllWindows()
