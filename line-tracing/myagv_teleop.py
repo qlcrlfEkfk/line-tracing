@@ -20,41 +20,34 @@ else:
 msg = """
 Reading from the keyboard and publishing to Twist!
 ---------------------------
-Moving around:
-   u    i    o
-   j    k    l
-   m    ,    .
-anything else : stop
-q/z : increase/decrease max speeds by 10%
-w/x : increase/decrease only linear speed by 10%
-e/c : increase/decrease only angular speed by 10%
+
 v : toggle camera on/off
 CTRL-C to quit
 """
 
-moveBindings = {
-    'i': (1, 0, 0, 0),
-    'o': (0, 0, 0, -1),
-    'j': (0, 1, 0, 0),
-    'l': (0, -1, 0, 0),
-    'u': (0, 0, 0, 1),
-    ',': (-1, 0, 0, 0),
-    '.': (-1, 0, 0, -1),
-    'm': (-1, 0, 0, 1)
-}
+# moveBindings = {
+#     'i': (1, 0, 0, 0),
+#     'o': (0, 0, 0, -1),
+#     'j': (0, 1, 0, 0),
+#     'l': (0, -1, 0, 0),
+#     'u': (0, 0, 0, 1),
+#     ',': (-1, 0, 0, 0),
+#     '.': (-1, 0, 0, -1),
+#     'm': (-1, 0, 0, 1)
+# }
 
-speedBindings = {
-    'q': (1.1, 1.1),
-    'z': (0.9, 0.9),
-    'w': (1.1, 1),
-    'x': (0.9, 1),
-    'e': (1, 1.1),
-    'c': (1, 0.9)
-}
+# speedBindings = {
+#     'q': (1.1, 1.1),
+#     'z': (0.9, 0.9),
+#     'w': (1.1, 1),
+#     'x': (0.9, 1),
+#     'e': (1, 1.1),
+#     'c': (1, 0.9)
+# }
 
 # 픽셀당 실제 길이 비율 설정
-ym_per_pix = 0.56 / 480  # 세로 픽셀당 미터
-xm_per_pix = 0.37 / 640  # 가로 픽셀당 미터
+ym_per_pix = 0.64 / 190  # 세로 픽셀당 미터
+xm_per_pix = 0.37 / 480  # 가로 픽셀당 미터
 
 # previous_turn = 0.5  # 초기 회전 값
 # previous_speed = 0.25  # 초기 속도 값
@@ -119,7 +112,7 @@ class CameraProcessingThread(threading.Thread):
             return
         
         h, w = frame.shape[:2]
-        new_camera_mtx, roi_value = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w, h), 1, (w, h))
+        new_camera_mtx, roi_value = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w, h), 0, (w, h))
         undistorted_frame = cv2.undistort(frame, camera_matrix, dist_coeffs, None, new_camera_mtx)
 
         filtered_image = self.color_filter(undistorted_frame)
@@ -172,7 +165,7 @@ class CameraProcessingThread(threading.Thread):
 
     def roi(self, image):
         x, y = image.shape[1], image.shape[0]
-        _shape = np.array([[(25, y), (x-25, y), (x-25, 0), (25,0)]], dtype=np.int32)
+        _shape = np.array([[(0, y), (x-0, y), (x-0, 0), (0,0)]], dtype=np.int32)
         mask = np.zeros_like(image)
         ignore_mask_color = (255,) * image.shape[2] if len(image.shape) > 2 else 255
         cv2.fillPoly(mask, np.int32([_shape]), ignore_mask_color)
@@ -180,7 +173,7 @@ class CameraProcessingThread(threading.Thread):
 
     def wrapping(self, image):
         h, w = image.shape[:2]
-        source = np.float32([[35, 350], [w-35, 350], [250, 170], [w - 250, 170]])
+        source = np.float32([[0, 335], [w-0, 335], [150, 200], [w - 170, 200]])
         destination = np.float32([[0, h], [w, h], [0, 0], [w, 0]])
         transform_matrix = cv2.getPerspectiveTransform(source, destination)
         minv = cv2.getPerspectiveTransform(destination, source)
@@ -335,9 +328,6 @@ class PublishThread(threading.Thread):
         self.speed = 0.0
         self.turn = 0.0
         self.offset = 0.0
-        self.integral_offset = 0.0  # 적분 누적값
-        self.Kp = 0.7  # 비례 계수
-        self.Ki = 0.1  # 적분 계수, 필요에 따라 조정
         self.condition = threading.Condition()
         self.done = False
         self.timeout = 0.05 / rate if rate != 0.0 else None
@@ -411,19 +401,47 @@ class PublishThread(threading.Thread):
     def update_offset(self, offset):
         self.offset = offset
 
+    # def update_movement_based_on_offset(self):
+    #     """
+    #     offset 값에 따라 이동 방향, 회전 및 속도를 설정하고 즉시 pub_thread에 반영합니다.
+    #     """
+    #     # 초기 설정
+    #     if self.offset > 1.5:
+    #         x, y, z, th = 1, 0, 0, -1  # 왼쪽 회전
+    #         turn = 0.15
+    #         speed = 0.1
+
+    #     elif self.offset < -1.5:
+    #         x, y, z, th = 1, 0, 0, 1  # 오른쪽 회전
+    #         turn = 0.15
+    #         speed = 0.1
+
+    #     elif -1.5 <= self.offset <= 1.5:
+    #         x, y, z, th = 1, 0, 0, 0  # 직진
+    #         turn = 0
+    #         speed = 0.15
+
+    #     ## 계산된 값들을 즉시 pub_thread에 업데이트하여 반영 thread에 있는 값들을 가져와서 main 함수에서 업데이트하게 
+    #     self.update(x, y, z, th, speed, turn)
+
     def update_movement_based_on_offset(self):
         """
-        offset 값에 따라 이동 방향, 회전 및 속도를 설정하고 즉시 pub_thread에 반영합니다.
+        offset 값에 따라 이동 방향, 회전 및 속도를 설정하고 P 제어를 적용하여 pub_thread에 반영합니다.
         """
-        # 초기 설정
+        # P 제어 상수 설정
+        Kp = 0.1  # 필요에 따라 조정
+
+        # P 제어로 회전값 계산
         if self.offset > 1.5:
             x, y, z, th = 1, 0, 0, -1  # 왼쪽 회전
-            turn = 0.15
+            turn = Kp * self.offset
+            turn = max(0.1, min(0.4, turn)) 
             speed = 0.1
 
         elif self.offset < -1.5:
             x, y, z, th = 1, 0, 0, 1  # 오른쪽 회전
-            turn = 0.15
+            turn = Kp * self.offset
+            turn = max(0.1, min(0.4, turn)) 
             speed = 0.1
 
         elif -1.5 <= self.offset <= 1.5:
@@ -431,13 +449,8 @@ class PublishThread(threading.Thread):
             turn = 0
             speed = 0.15
 
-        # PI 제어를 사용해 추가 회전 보정
-        # self.integral_offset += self.offset
-        # offset_ratio = (self.Kp * self.offset) + (self.Ki * self.integral_offset)
-        # turn = max(-1.0, min(1.0, turn + offset_ratio))
-
-        ## 계산된 값들을 즉시 pub_thread에 업데이트하여 반영 thread에 있는 값들을 가져와서 main 함수에서 업데이트하게 
-        # self.update(x, y, z, th, speed, turn)
+        # 최종 업데이트
+        self.update(x, y, z, th, speed, turn)
 
     
 def getKey(timeout):
@@ -500,18 +513,9 @@ if __name__ == "__main__":
                     processing_thread.start()
                 else:
                     print("Stopping camera...")
+                    pub_thread.update(0, 0, 0, 0, 0, 0)
                     camera_thread.stop()
                     processing_thread.stop()
-
-            elif key in moveBindings:
-                x, y, z, th = moveBindings[key]
-            elif key in speedBindings:
-                x *= speedBindings[key][0]
-                turn *= speedBindings[key][1]
-            else:
-                x = y = z = th = 0
-                if key == '\x03':
-                    break
 
             # 업데이트된 방향과 속도로 명령 전송
             pub_thread.update(x, y, z, th, speed, turn)
